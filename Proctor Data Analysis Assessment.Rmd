@@ -1,0 +1,346 @@
+---
+title: "Proctor Data Analysis Assessment"
+organization: Proctor -UCSF
+author: "Author:Yueran Zhang(yz4188@cumc.columbia.edu)"
+date: "2023-04-14"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+
+
+<br>
+
+### R package
+Here are the packages we would use in this exercise.
+```{r R package, message=FALSE,warning=FALSE,}
+library(dplyr)
+library(moments)
+library(repr)
+library(ggplot2)
+library(onehot)
+library(gridExtra)
+library(boot) 
+```
+<br>
+
+### Session 1 - Data process
+
+###### This section, we focus on data import, merge and manipulation.
+
+##### STEPS:
+
+1) In this part, we would first import two data files into R Markdown by using function **_"read.csv"_**. One is for child level data, another is for additional community-level characteristics. 
+ 
+2) In order to have a better understanding of these related variables, we merge these two variables by using function **_"full_join"_**, which provide us a very quick tool to join the union variables,keeps data that appear in either dataframes.
+ 
+3) With the final step in this section, we will add a new variable called **serpositivity**, this variable measures whether whether the child was seropositive to either the SEA antigen(variable:sea_pos) or the Sm25 antigen(variable:sm25_pos). 
+*  If any of these two variable represents is coded as 1(shown positive status), we will record the new variable as positive; otherwise, if both variables are coded as 0(shown as negative), the new variable will show negative.
+
+4) In order to make sure all the above steps are correct, we will check the new joined dataset. 
+
+```{r Session1- data process,echo=TRUE, message=FALSE,warning=FALSE}
+#---------------------------
+# Import data
+#---------------------------
+
+# Child level data
+schisto.data <- read.csv("./data/mbita_schisto.csv") %>%  
+  janitor::clean_names()
+
+# Additional community-level characteristics
+spatial.data <- read.csv("./data/mbita_spatial.csv") %>% 
+  janitor::clean_names()  
+
+#---------------------------
+# Joining Dataframe
+#---------------------------
+
+joined.df <- full_join(schisto.data,spatial.data,
+                       by = "vid") %>% 
+  
+#---------------------------
+# Add a new variable
+#---------------------------
+ mutate(serpositivity = 
+          ifelse(
+            sea_pos == 1 | sm25_pos == 1, "Positive", "Negative") )
+
+
+```
+
+```{r, Section1-Check, echo=TRUE, message=FALSE,warning=FALSE,collapse = TRUE}
+#---------------------------
+#Check for safety
+#---------------------------
+head(joined.df) 
+dim(joined.df)
+```
+
+### Section2 - Descpritive of Data
+
+###### This section, we want to do some exploratory data analysis.
+
+##### STEPS:
+
+1) Cleaning the Data
+
+* Though there seems to be many numeric variables, not all of them are true numerical variables. Some are displayed as numbers but are really factors. These variables will be converted from int to factor. variable _pid_ do not convey  useful information in this section, so we dropped it.
+
+* In addition, NA's need to be reported or deleted. Since we observe the population is large enough(n=3663), the missing data is nearly 237 observation. If we replace all of this value with mean value, the results will be biased a lot. Therefore, we need to delete these missing value.
+
+2) Basic Processing
+
+* This part we would see the skewness and scale numerical features.
+
+* We see that for the biomarkers' variables (eg.`sea`,`sm25`,`sm_epg`) are almost left skewness,meaning the bulk of the observations are medium or large, with a few observations that are much smaller than the rest, which means that most overvaluations are  with the Schistosomiasis.
+```{r Session2-EDA:clean, echo=FALSE, message=FALSE,warning=FALSE,results="hide"}
+#---------------------------
+#Clean for the data
+#---------------------------
+
+# Copy the dat and delete the variable of "pid"
+joined.new <- joined.df 
+joined.new <- joined.new %>% 
+                 select(-c(vid)) 
+
+# Convert factor
+to_be_factors <- c("year", "arm", "pid", "sex", "sea_pos", "sm25_pos", 
+                   "kk_pos", "serpositivity")
+
+joined.new[to_be_factors] <- lapply(joined.new[to_be_factors], factor)
+
+```
+
+
+
+```{r Session2-EDA:convert, echo=TRUE, message=FALSE,warning=FALSE}
+#---------------------------
+#Summary for the variables' category
+#---------------------------
+# Number of numeric variables
+cat(paste("Number of Numeric Variables: ", sum(sapply(joined.new, is.numeric)))) 
+# Number of categorical variables
+cat(paste("\nNumber of Categorical Variables: ", sum(sapply(joined.new, is.factor)))) 
+```
+
+```{r Session2-EDA:summary, echo=TRUE, message=FALSE,warning=FALSE}
+#---------------------------
+#Data Summary
+#---------------------------
+joined.new %>%
+skimr::skim()%>%
+knitr::knit_print()
+```
+
+From the above summary table,
+ 
+* For categorical variables, expect variable `kk_pos` has 237 rows of missing data, other variables are in good condition with no missing value.
+* For numerical variables,`sm_epg` ,which is the numeric results corresponding to the `kk_pos`variable, has 237 rows of missing data, there is no other variable with missing data.
+
+```{r Session2-EDA:missing value by year, echo=TRUE, message=FALSE,warning=FALSE}
+#---------------------------
+#Count missing values by year
+#---------------------------
+missing.dat <- joined.new %>% 
+  filter_all(any_vars(is.na(.))) 
+ 
+missing.dat %>%
+  count(year) %>%
+  knitr::kable(digits = 1) 
+
+
+```
+
+* We see the missing data that are sorted by year. The first year missing data from using stool-based measures of infection is 48, and it is noticeable that the final year 2014 had the most number of missing data(n=174).
+
+```{r Session2-EDA:null, echo=TRUE, message=FALSE,warning=FALSE,results='hide'}
+
+#---------------------------
+#Delete the missing value
+#---------------------------
+
+# For Numeric Missing Values - Replace NA with the mean
+joined.new$sm_epg[is.na(joined.new$sm_epg)] <- mean(joined.new$sm_epg,na.rm =TRUE)
+
+# Replace NA in categorical variables for empty_means_without
+
+empty_means_without <- c("year", "arm", "pid", "sex", "sea_pos", "sm25_pos",  "serpositivity")
+empty_means_NA <- c("kk_pos") 
+
+replace_empty_with_without <- function(feature) {
+    levels(feature) <- c(levels(feature), "Without")
+    feature[is.na(feature)] <- "Without"
+    return(feature)
+}
+
+for (feature in empty_means_without) {
+    joined.new[,feature] <- replace_empty_with_without(joined.new[,feature])
+}
+
+joined.new <- na.omit(joined.new)
+
+
+str(joined.new)
+```
+
+```{r Session2-EDA:numeric-processin, echo=TRUE, message=FALSE,warning=FALSE}
+
+#---------------------------
+# Numeric variable characteristic
+#---------------------------
+num_vars <- sapply(joined.new, is.numeric)
+dat_stats <- data.frame(Feature = colnames(joined.new[num_vars]))
+
+options(scipen=10000)
+dat_stats['Mean'] <- sapply(joined.new[num_vars], mean)
+dat_stats['SD'] <- sapply(joined.new[num_vars], sd)
+dat_stats['Skewness'] <- sapply(joined.new[num_vars], skewness)
+dat_stats['Kurtosis'] <- sapply(joined.new[num_vars], kurtosis)
+dat_stats %>% 
+  knitr::kable(digits = 3) 
+
+
+```
+```{r,Session2-EDA:numeric-processin2, echo=FALSE, message=FALSE,warning=FALSE}
+#---------------------------
+# Numeric variable distribution
+#---------------------------
+
+# AGE
+options(repr.plot.height = 4)
+qplot(joined.new$agey, geom="histogram", bins=200, alpha=I(.4)) +
+        geom_vline(aes(xintercept=mean(joined.new$agey)), color="red", linetype="dashed", size=1) +
+        geom_vline(aes(xintercept=median(joined.new$agey)), color="blue", linetype="dashed", size=1) +
+        ggtitle("Age Distribution") + 
+        xlab("age") +
+        ylab("Count")
+
+#SEA
+options(repr.plot.height = 4)
+qplot(joined.new$sea, geom="histogram", bins=200, alpha=I(.4)) +
+        geom_vline(aes(xintercept=mean(joined.new$sea)), color="red", linetype="dashed", size=1) +
+        geom_vline(aes(xintercept=median(joined.new$sea)), color="blue", linetype="dashed", size=1) +
+        ggtitle("Soluble egg antigen (SEA) Distribution") + 
+        xlab("SEA value") +
+        ylab("Count")
+
+#SM25
+options(repr.plot.height = 4)
+qplot(joined.new$sm25, geom="histogram", bins=10, alpha=I(.4)) +
+        geom_vline(aes(xintercept=mean(joined.new$sm25)), color="red", linetype="dashed", size=1) +
+        geom_vline(aes(xintercept=median(joined.new$sm25)), color="blue", linetype="dashed", size=1) +
+        ggtitle("Sm25 recombinant antigen Distribution") + 
+        xlab("sm25 value") +
+        ylab("Count")
+
+#sm_epg
+options(repr.plot.height = 4)
+qplot(joined.new$sm_epg, geom="histogram", bins=10, alpha=I(.4)) +
+        geom_vline(aes(xintercept=mean(joined.new$sm_epg)), color="red", linetype="dashed", size=1) +
+        geom_vline(aes(xintercept=median(joined.new$sm_epg)), color="blue", linetype="dashed", size=1) +
+        ggtitle("SKato-Katz dual slide S. mansoni eggs per gram of stool Distribution") + 
+        xlab("sm_epg value") +
+        ylab("Count")
+
+#elev
+options(repr.plot.height = 4)
+qplot(joined.new$elev, geom="histogram", bins=200, alpha=I(.4)) +
+        geom_vline(aes(xintercept=mean(joined.new$elev)), color="red", linetype="dashed", size=1) +
+        geom_vline(aes(xintercept=median(joined.new$elev)), color="blue", linetype="dashed", size=1) +
+        ggtitle("village elevation in meters Distribution") + 
+        xlab("elev value") +
+        ylab("Count")
+
+#tmin
+options(repr.plot.height = 4)
+qplot(joined.new$tmin, geom="histogram", bins=200, alpha=I(.4)) +
+        geom_vline(aes(xintercept=mean(joined.new$tmin)), color="red", linetype="dashed", size=1) +
+        geom_vline(aes(xintercept=median(joined.new$tmin)), color="blue", linetype="dashed", size=1) +
+        ggtitle("village average minimum temperature Distribution") + 
+        xlab("elev value") +
+        ylab("Count")
+
+#prec
+options(repr.plot.height = 4)
+qplot(joined.new$prec, geom="histogram", bins=200, alpha=I(.4)) +
+        geom_vline(aes(xintercept=mean(joined.new$prec)), color="red", linetype="dashed", size=1) +
+        geom_vline(aes(xintercept=median(joined.new$prec)), color="blue", linetype="dashed", size=1) +
+        ggtitle("village average precipitation Distribution") + 
+        xlab("prec value") +
+        ylab("Count")
+
+#dist_victoria
+options(repr.plot.height = 4)
+qplot(joined.new$dist_victoria, geom="histogram", bins=200, alpha=I(.4)) +
+        geom_vline(aes(xintercept=mean(joined.new$dist_victoria)), color="red", linetype="dashed", size=1) +
+        geom_vline(aes(xintercept=median(joined.new$dist_victoria)), color="blue", linetype="dashed", size=1) +
+        ggtitle("village distance to lake Victoria Distribution") + 
+        xlab("dist_victoria value") +
+        ylab("Count")
+```
+
+### Section3 - Summarize baseline characteristics
+
+###### This section, we will create a table that summarizes individual-level and cluster-level characteristics by randomized group.
+
+
+```{r,Summarize baseline characteristics, echo=FALSE, message=FALSE,warning=FALSE,results='hide'}
+#---------------------------
+# Filter baseline data
+#---------------------------
+baseline.dat <- joined.new %>% 
+filter(year == 2012)
+
+#Relabel for the categorical data
+baseline.dat <- baseline.dat %>% 
+  mutate(
+    sea_pos = case_when(sea_pos =="1" ~ "Positive",
+                        sea_pos =="0" ~ "Negative"),
+    sm25_pos = case_when(sm25_pos =="1" ~ "Positive",
+                        sm25_pos =="0" ~ "Negative"),
+    kk_pos = case_when(kk_pos =="1" ~ "Positive",
+                        kk_pos =="0" ~ "Negative"),
+  ) %>% 
+as.data.frame()
+
+```
+
+
+```{r Section3-Tibble,echo=TRUE, message=FALSE,warning=FALSE}
+#---------------------------
+# Summary for baseline characteristics
+#---------------------------
+ 
+# create a function to compute the p-value for continuous or categorical variables.
+pvalue <- function(x, ...) {
+    y <- unlist(x)
+    g <- factor(rep(1:length(x), times=sapply(x, length)))
+    if (is.numeric(y)) {
+        p <- t.test(y ~ g)$p.value
+    } else {
+        p <- chisq.test(table(y, g))$p.value
+    }
+    c("", sub("<", "&lt;", format.pval(p, digits=3, eps=0.001)))
+}
+
+#Table for variable characteristic
+table1::table1(~ factor(sex) + agey + sea + sm25 + sm_epg +factor(sea_pos)
+                 +factor(sm25_pos) +factor(kk_pos) +factor(serpositivity) 
+               + elev + tmin + prec + dist_victoria| arm,
+               data = baseline.dat,overall=F, extra.col=list(`P-value`=pvalue), caption = "Table1. Baseline characteristics by randomized group",) 
+
+```
+<br>
+
+Conclusion:
+
+ * We assume these two groups are not pretty balanced. From the given condition and check the criteria in the Consort 2010 statement, the population group people are from the same Mbita subcounty in western Kenya, so there is no significant confounding variable due to geographic effect. However, looking back the data in CWT and SBT group, the report P-values for the each variable in Table 1, in attempt to either support the balanced assignment in the case of non-significant P value (usually ≥0.05), or to indicate that the balance between groups was not ideal, if P-value was significant (usually <0.05). The biomarkers variables as `sea`,`sea_pos`and `serpositivity`,showing as P-value less than 0.05, which indicates the two groups are somewhat imbalanced.
+ 
+ Reflection:
+ 
+ * In the study, planners thoroughly shuffled and randomly split up study subjects into two groups. Also, if we want to improve the balance between two groups,using a placebo, which allowed the study to be double-blinded (neither subjects nor researchers knew who got which treatment). Randomization minimizes noncomparability due to confounding and protects the study from any biases that may be introduced by the researchers into the assignment process. Blinding preserves the benefits of randomization by preventing biased reporting of symptoms or assessment of outcomes.
+ 
+
